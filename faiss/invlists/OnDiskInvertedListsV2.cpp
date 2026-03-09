@@ -73,33 +73,51 @@ namespace {
 
 struct OnDiskInvertedListsV2Iterator : InvertedListsIterator {
     const OnDiskInvertedListsV2* parent;
-    size_t list_no;
+    size_t list_size = 0;
     size_t i = 0;
-    std::vector<uint8_t> codes;
-    std::vector<idx_t> ids;
+    uint8_t* codes = nullptr;
+    idx_t* ids = nullptr;
+    size_t codes_bytes = 0;
+    size_t ids_bytes = 0;
 
     OnDiskInvertedListsV2Iterator(
             const OnDiskInvertedListsV2* parent,
             size_t list_no)
-            : parent(parent), list_no(list_no) {
+            : parent(parent) {
         const OnDiskOneList& l = parent->lists.at(list_no);
         if (l.size == 0) {
             return;
         }
+        list_size = l.size;
+        codes_bytes = l.size * parent->code_size;
+        ids_bytes = l.size * sizeof(idx_t);
 
-        codes.resize(l.size * parent->code_size);
-        ids.resize(l.size);
+        codes = static_cast<uint8_t*>(parent->alloc_buf(codes_bytes));
+        ids = static_cast<idx_t*>(parent->alloc_buf(ids_bytes));
 
         // Layout: [codes: capacity*code_size][ids: capacity*sizeof(idx_t)]
-        parent->read_at_exact(l.offset, codes.data(), codes.size());
+        parent->read_at_exact(l.offset, codes, codes_bytes);
         parent->read_at_exact(
                 l.offset + l.capacity * parent->code_size,
-                ids.data(),
-                ids.size() * sizeof(idx_t));
+                ids,
+                ids_bytes);
     }
 
+    ~OnDiskInvertedListsV2Iterator() override {
+        if (codes) {
+            parent->free_buf(codes, codes_bytes);
+        }
+        if (ids) {
+            parent->free_buf(ids, ids_bytes);
+        }
+    }
+
+    // non-copyable
+    OnDiskInvertedListsV2Iterator(const OnDiskInvertedListsV2Iterator&) = delete;
+    OnDiskInvertedListsV2Iterator& operator=(const OnDiskInvertedListsV2Iterator&) = delete;
+
     bool is_available() const override {
-        return i < ids.size();
+        return i < list_size;
     }
 
     void next() override {
@@ -107,7 +125,7 @@ struct OnDiskInvertedListsV2Iterator : InvertedListsIterator {
     }
 
     std::pair<idx_t, const uint8_t*> get_id_and_codes() override {
-        return {ids[i], codes.data() + i * parent->code_size};
+        return {ids[i], codes + i * parent->code_size};
     }
 };
 
@@ -137,6 +155,25 @@ void OnDiskInvertedListsV2::set_reader(
     reader_ = std::move(reader);
 }
 
+void OnDiskInvertedListsV2::set_allocator(MemoryAllocator allocator) {
+    allocator_ = std::move(allocator);
+}
+
+void* OnDiskInvertedListsV2::alloc_buf(size_t nbytes) const {
+    if (allocator_.alloc) {
+        return allocator_.alloc(nbytes);
+    }
+    return new uint8_t[nbytes];
+}
+
+void OnDiskInvertedListsV2::free_buf(void* buf, size_t nbytes) const {
+    if (allocator_.free) {
+        allocator_.free(buf, nbytes);
+        return;
+    }
+    delete[] static_cast<uint8_t*>(buf);
+}
+
 size_t OnDiskInvertedListsV2::list_size(size_t list_no) const {
     return lists.at(list_no).size;
 }
@@ -146,8 +183,9 @@ const uint8_t* OnDiskInvertedListsV2::get_codes(size_t list_no) const {
     if (l.size == 0) {
         return nullptr;
     }
-    auto* out = new uint8_t[l.size * code_size];
-    read_at_exact(l.offset, out, l.size * code_size);
+    size_t nbytes = l.size * code_size;
+    auto* out = static_cast<uint8_t*>(alloc_buf(nbytes));
+    read_at_exact(l.offset, out, nbytes);
     return out;
 }
 
@@ -156,24 +194,29 @@ const idx_t* OnDiskInvertedListsV2::get_ids(size_t list_no) const {
     if (l.size == 0) {
         return nullptr;
     }
-    auto* out = new idx_t[l.size];
+    size_t nbytes = l.size * sizeof(idx_t);
+    auto* out = static_cast<idx_t*>(alloc_buf(nbytes));
     read_at_exact(
             l.offset + l.capacity * code_size,
             out,
-            l.size * sizeof(idx_t));
+            nbytes);
     return out;
 }
 
 void OnDiskInvertedListsV2::release_codes(
-        size_t /*list_no*/,
+        size_t list_no,
         const uint8_t* codes) const {
-    delete[] codes;
+    if (!codes) return;
+    const OnDiskOneList& l = lists.at(list_no);
+    free_buf(const_cast<uint8_t*>(codes), l.size * code_size);
 }
 
 void OnDiskInvertedListsV2::release_ids(
-        size_t /*list_no*/,
+        size_t list_no,
         const idx_t* ids) const {
-    delete[] ids;
+    if (!ids) return;
+    const OnDiskOneList& l = lists.at(list_no);
+    free_buf(const_cast<idx_t*>(ids), l.size * sizeof(idx_t));
 }
 
 bool OnDiskInvertedListsV2::is_empty(size_t list_no, void*) const {

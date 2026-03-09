@@ -51,6 +51,20 @@ private:
 };
 
 /**
+ * Pluggable memory allocator for OnDiskInvertedListsV2.
+ *
+ * When set, the iterator and fallback get_codes/get_ids paths allocate
+ * through these callbacks instead of global new/delete, so the host
+ * application (e.g. Doris) can track the memory.
+ */
+struct MemoryAllocator {
+    /// Allocate @p nbytes of memory.  Must not return nullptr.
+    std::function<void*(size_t nbytes)> alloc;
+    /// Free @p ptr previously returned by alloc, of size @p nbytes.
+    std::function<void(void* ptr, size_t nbytes)> free;
+};
+
+/**
  * OnDiskInvertedListsV2:
  * - no mmap
  * - read-once list scan via iterator
@@ -75,6 +89,10 @@ struct OnDiskInvertedListsV2 : ReadOnlyInvertedLists {
     /// Must be called before any read operation (get_codes, get_ids, get_iterator).
     void set_reader(std::unique_ptr<RandomAccessReader> reader);
 
+    /// Optionally set a custom memory allocator for iterator/fallback buffers.
+    /// When not set, standard new[]/delete[] is used.
+    void set_allocator(MemoryAllocator allocator);
+
     size_t list_size(size_t list_no) const override;
 
     // fallback APIs (allocate per call, caller releases with release_*)
@@ -94,8 +112,14 @@ struct OnDiskInvertedListsV2 : ReadOnlyInvertedLists {
     /// Read exactly @p nbytes from the data at byte @p offset.
     void read_at_exact(size_t offset, void* ptr, size_t nbytes) const;
 
+    /// Allocate nbytes via custom allocator or global new[].
+    void* alloc_buf(size_t nbytes) const;
+    /// Free buf of nbytes via custom allocator or global delete[].
+    void free_buf(void* buf, size_t nbytes) const;
+
 private:
     std::unique_ptr<RandomAccessReader> reader_;
+    MemoryAllocator allocator_; ///< custom allocator (may be empty)
 };
 
 /**
