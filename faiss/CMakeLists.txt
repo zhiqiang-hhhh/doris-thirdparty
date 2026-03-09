@@ -243,6 +243,8 @@ set(FAISS_HEADERS
 if(NOT WIN32)
   list(APPEND FAISS_SRC invlists/OnDiskInvertedLists.cpp)
   list(APPEND FAISS_HEADERS invlists/OnDiskInvertedLists.h)
+  list(APPEND FAISS_SRC invlists/OnDiskInvertedListsV2.cpp)
+  list(APPEND FAISS_HEADERS invlists/OnDiskInvertedListsV2.h)
 endif()
 
 # Export FAISS_HEADERS variable to parent scope.
